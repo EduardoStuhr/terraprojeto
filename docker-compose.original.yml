@@ -1,0 +1,191 @@
+# docker-compose.yml
+# Configuração completa do ambiente TRANSJAP DDO
+
+version: '3.8'
+
+services:
+  # ==================== POSTGRESQL ====================
+  postgres:
+    image: postgres:15-alpine
+    container_name: transjap-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: transjap_ddo
+      POSTGRES_USER: transjap_user
+      POSTGRES_PASSWORD: transjap_secure_password_2024
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=pt_BR.UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    networks:
+      - transjap-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transjap_user -d transjap_ddo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== REDIS ====================
+  redis:
+    image: redis:7-alpine
+    container_name: transjap-redis
+    restart: unless-stopped
+    command: redis-server --requirepass transjap_redis_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - transjap-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== BACKEND (API) ====================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: transjap-backend
+    restart: unless-stopped
+    environment:
+      # Aplicação
+      NODE_ENV: development
+      PORT: 3000
+      
+      # Banco de dados
+      DATABASE_URL: postgresql://transjap_user:transjap_secure_password_2024@postgres:5432/transjap_ddo?schema=public
+      
+      # Redis
+      REDIS_URL: redis://:transjap_redis_password@redis:6379
+      
+      # JWT
+      JWT_SECRET: transjap_jwt_secret_key_very_secure_change_in_production
+      JWT_EXPIRES_IN: 15m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+      
+      # AWS S3 (ou MinIO)
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: transjap-ddo
+      S3_ENDPOINT: http://minio:9000
+      
+      # E-mail (opcional)
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USER: seu-email@gmail.com
+      SMTP_PASSWORD: sua-senha-app
+      
+      # Logs
+      LOG_LEVEL: debug
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - transjap-network
+    command: npm run dev
+
+  # ==================== FRONTEND ====================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: transjap-frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:3000/api
+      VITE_APP_NAME: TRANSJAP DDO
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - transjap-network
+    command: npm run dev -- --host
+
+  # ==================== MINIO (S3 Compatible Storage) ====================
+  minio:
+    image: minio/minio:latest
+    container_name: transjap-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - transjap-network
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ==================== ADMINER (DB Management) ====================
+  adminer:
+    image: adminer:latest
+    container_name: transjap-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      - postgres
+    networks:
+      - transjap-network
+
+  # ==================== NGINX (Reverse Proxy - Produção) ====================
+  nginx:
+    image: nginx:alpine
+    container_name: transjap-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - transjap-network
+    profiles:
+      - production
+
+# ==================== VOLUMES ====================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# ==================== NETWORKS ====================
+networks:
+  transjap-network:
+    driver: bridge
